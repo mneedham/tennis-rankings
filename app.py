@@ -2,6 +2,7 @@ import streamlit as st
 import chdb
 import pandas as pd
 import re
+from typing import Dict, List, Optional, Tuple
 
 # Page configuration
 st.set_page_config(
@@ -22,7 +23,7 @@ st.markdown(
 def get_all_players():
     query = """
     SELECT DISTINCT json.player.fullName::String AS player_name
-    FROM file('wta_rankings/*.jsonl', JSONAsObject)
+    FROM file('data/rankings.json.gz', JSONAsObject)
     WHERE json.player.fullName IS NOT NULL
     ORDER BY player_name::String
     """
@@ -69,9 +70,9 @@ def generate_query(selected_players, min_age=0, max_age=50):
             json.player.fullName AS player_name,
             json.points AS points,
             json.ranking AS ranking,
-            age('year', toDate(json.player.dateOfBirth), toDate(splitByChar('_', _file)[1])) AS age_years,
-            age('month', toDate(json.player.dateOfBirth), toDate(splitByChar('_', _file)[1])) % 12 AS age_months
-        FROM file('wta_rankings/*.jsonl', JSONAsObject)
+            age('year', toDate(json.player.dateOfBirth), toDate(splitByChar('_', json._file)[1])) AS age_years,
+            age('month', toDate(json.player.dateOfBirth), toDate(splitByChar('_', json._file)[1])) % 12 AS age_months
+        FROM file('data/rankings.json.gz', JSONAsObject)
         WHERE {where_str}
     )
     GROUP BY age_years, age_months
@@ -83,46 +84,139 @@ def generate_query(selected_players, min_age=0, max_age=50):
     
     return query
 
-# Function to style the dataframe
-def style_dataframe(df, selected_players):
-    if df.empty:
-        return df
+def create_ranking_table(rankings_data: Dict[str, Dict[str, int]], sorted_ages: List[str]) -> None:
+    """Display rankings in a table with players as rows and ages as columns.
     
-    # Get ranking columns (exclude age columns)
-    ranking_cols = [col for col in df.columns if col not in ['age']]
+    Args:
+        rankings_data: Dictionary mapping player names to their age-based rankings
+        sorted_ages: List of age strings in the correct order
+    """
+    if not rankings_data or not sorted_ages:
+        st.warning("No ranking data available.")
+        return
     
-    def highlight_best(row):
-        styles = [''] * len(row)
-        
-        # Get values for ranking columns only
-        ranking_values = []
-        ranking_indices = []
-        
-        for i, col in enumerate(df.columns):
-            if col != 'age':
-                val = row[col]
-                if pd.notna(val):
-                    ranking_values.append(val)
-                    ranking_indices.append(i)
-        
-        if ranking_values:
-            min_val = min(ranking_values)
-            # Highlight cells with the best (minimum) ranking in green
-            for i in ranking_indices:
-                val = row[df.columns[i]]
-                if pd.notna(val) and val == min_val:
-                    styles[i] = 'background-color: #4CAF50; color: white; font-weight: bold'
-        
-        return styles
+    # Create table data
+    table_data = []
     
-    # Apply styling
-    styled_df = df.style.apply(highlight_best, axis=1)
+    # Header row
+    header = ["Player"] + sorted_ages
+    table_data.append(header)
     
-    # Format all columns as integers (no decimal places)
-    format_dict = {col: '{:.0f}' for col in ranking_cols}
-    styled_df = styled_df.format(format_dict, na_rep='')
+    # Data rows
+    for player, rankings in rankings_data.items():
+        row = [player]
+        for age in sorted_ages:
+            rank = rankings.get(age, '')
+            row.append(rank if rank != '' else '-')
+        table_data.append(row)
     
-    return styled_df
+    # Display the table with custom styling
+    st.markdown("""
+        <style>
+            .ranking-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 14px;
+                margin: 20px 0;
+            }
+            .ranking-table th, .ranking-table td {
+                padding: 10px 8px;
+                text-align: center;
+                border: 1px solid #ddd;
+                min-width: 60px;
+            }
+            .ranking-table th {
+                background-color: #2c3e50;
+                color: white;
+                font-weight: bold;
+                position: sticky;
+                top: 0;
+                z-index: 10;
+            }
+            .ranking-table th:first-child {
+                text-align: left;
+                min-width: 150px;
+                background-color: #34495e;
+            }
+            .ranking-table td:first-child {
+                text-align: left;
+                font-weight: bold;
+                background-color: #ecf0f1;
+                color: #000;
+                position: sticky;
+                left: 0;
+                z-index: 5;
+            }
+            .ranking-table tbody tr:hover {
+                background-color: #e3f2fd;
+            }
+            .ranking-table tbody tr:hover td {
+                color: #000;
+            }
+            .ranking-table tbody tr:hover td:first-child {
+                background-color: #bbdefb;
+            }
+            .best-rank {
+                background-color: #27ae60 !important;
+                color: white;
+                font-weight: bold;
+            }
+            .ranking-table-container {
+                overflow-x: auto;
+                max-width: 100%;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Find best ranks for each age
+    best_ranks = {}
+    for age in sorted_ages:
+        ranks = []
+        for player, rankings in rankings_data.items():
+            if age in rankings and rankings[age] is not None:
+                ranks.append(rankings[age])
+        best_ranks[age] = min(ranks) if ranks else None
+    
+    # Create HTML table with best ranks highlighted
+    html = ['<div class="ranking-table-container">']
+    html.append('<table class="ranking-table">')
+    
+    # Header
+    html.append('<thead><tr>')
+    for col_name in header:
+        html.append(f'<th>{col_name}</th>')
+    html.append('</tr></thead><tbody>')
+    
+    # Rows
+    for row_idx, row in enumerate(table_data[1:], 1):  # Skip header row
+        html.append('<tr>')
+        for col_idx, cell in enumerate(row):
+            if col_idx == 0:  # Player name column
+                html.append(f'<td>{cell}</td>')
+            else:
+                age = header[col_idx]
+                player = row[0]
+                rank = rankings_data[player].get(age)
+                if rank is not None:
+                    cell_class = 'class="best-rank"' if rank == best_ranks.get(age) else ''
+                    html.append(f'<td {cell_class}>{int(rank)}</td>')
+                else:
+                    html.append('<td>-</td>')
+        html.append('</tr>')
+    
+    html.append('</tbody></table>')
+    html.append('</div>')
+    
+    # Display the table
+    st.markdown(''.join(html), unsafe_allow_html=True)
+    
+    # Add a legend
+    st.markdown("""
+        <div style="margin-top: 10px; font-size: 12px; color: #666;">
+            <span style="background-color: #27ae60; color: white; padding: 2px 8px; border-radius: 3px; margin-right: 10px;">Green</span>
+            = Best ranking for that age
+        </div>
+    """, unsafe_allow_html=True)
 
 # Sidebar for player selection
 st.sidebar.header("Player Selection")
@@ -135,8 +229,6 @@ default_players = [
     'Hannah Klugman',
     'Mika Stojsavljevic',
     'Mingge Xu',
-    'Mirra Andreeva',
-    'Iva Jovic'
 ]
 
 # Filter default players to only include those that exist
@@ -177,39 +269,62 @@ else:
                 result_df = chdb.query(query, 'DataFrame')
                 
                 if not result_df.empty:
-                    # Rename columns for display
-                    display_df = result_df.copy()
-                    
-                    # Create a mapping for column names (just player names, no "Age" label)
-                    col_mapping = {}
-                    for player in selected_players:
-                        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', player.lower())
-                        col_mapping[f'{safe_name}_ranking'] = player
-                    
-                    # Select and rename columns for display
-                    display_cols = ['age'] + [col for col in display_df.columns if col.endswith('_ranking')]
-                    display_df = display_df[display_cols]
-                    display_df = display_df.rename(columns=col_mapping)
-                    
-                    # Convert ranking columns to integers
-                    for player in selected_players:
-                        if player in display_df.columns:
-                            display_df[player] = display_df[player].astype('Int64')
-                    
-                    # Remove completely empty rows (where all player columns are null)
-                    player_cols = [col for col in display_df.columns if col != 'age']
-                    display_df = display_df[display_df[player_cols].notna().any(axis=1)]
-                    
-                    # Style and display the dataframe
-                    styled_df = style_dataframe(display_df, selected_players)
-                    
-                    st.dataframe(
-                        styled_df,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                                      
+                    try:
+                        # Restructure data for the new table format
+                        rankings_data = {}
+                        age_map = {}  # Map formatted age string to (years, months) for sorting
                         
+                        # Initialize player entries
+                        for player in selected_players:
+                            safe_name = re.sub(r'[^a-zA-Z0-9]', '_', player.lower())
+                            rankings_data[player] = {}
+                        
+                        # First pass: collect all unique age strings and their (years, months)
+                        for idx, row in result_df.iterrows():
+                            try:
+                                age_years = int(row.get('age_years', 0))
+                                age_months = int(row.get('age_months', 0))
+                                age_str = row.get('age', '')
+                                
+                                if age_str and pd.notna(age_str):
+                                    age_map[age_str] = (age_years, age_months)
+                                    
+                            except Exception as e:
+                                st.warning(f"Error processing age in row {idx}: {str(e)}")
+                        
+                        # Sort ages based on years and months
+                        sorted_ages = sorted(age_map.keys(), 
+                                          key=lambda x: (age_map[x][0], age_map[x][1]))
+                        
+                        # Second pass: fill in the rankings
+                        for idx, row in result_df.iterrows():
+                            try:
+                                age_str = str(row.get('age', '')).strip()
+                                if not age_str or age_str.lower() == 'nan':
+                                    continue
+                                    
+                                for player in selected_players:
+                                    safe_name = re.sub(r'[^a-zA-Z0-9]', '_', player.lower())
+                                    rank_col = f'{safe_name}_ranking'
+                                    
+                                    if rank_col in row and pd.notna(row[rank_col]):
+                                        try:
+                                            rank = int(float(row[rank_col]))
+                                            rankings_data[player][age_str] = rank
+                                        except (ValueError, TypeError):
+                                            continue
+                            except Exception as e:
+                                st.warning(f"Error processing row {idx}: {str(e)}")
+                                continue
+                        
+                        # Display the table with the sorted ages
+                        create_ranking_table(rankings_data, sorted_ages)
+                        
+                    except Exception as e:
+                        st.error(f"Error in data processing: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                    
                 else:
                     st.warning("No data found for the selected players.")
                     
